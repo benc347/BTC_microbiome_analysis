@@ -1,0 +1,315 @@
+---
+title: "16S rRNA gene amplicon sequencing analysis - data processing in phyloseq"
+output: html_document
+date: "2024-11-04"
+---
+
+Introduction and Notes
+
+```{r}
+
+#11-4-24
+
+# The below is based on code written by Dr. Lucas Koester, Chiron Anderson, Dr. Laura Tibbs-Cortes, and Faith Rahic-Seggerman
+#
+# Working environment should be structured like the following:
+# 
+# [PROJECT FOLDER]
+#     |-->[taxonomy]
+#     |      |---------> test_taxonomy.taxonomy
+#     |-->[shared]
+#     |      |---------> test_shared.shared
+#     |-->[design]
+#     |      |---------> test_design.csv
+#     |--> this file
+
+# Prior to running this file, you should perform OTU clustering/ASV generation, taxonomic classification, and read quantification 
+#   The code here was built for processing output from mothur - https://mothur.org/
+#   However, with some modifications, it would also work for ASV-based methodologies like Qiime2 - https://qiime2.org/
+
+# Phyloseq is used to process and manipulate that mothur output - https://www.bioconductor.org/packages/release/bioc/html/phyloseq.html
+# Decontam is used to account for contaminating taxa by assessing OTUs/ASVs found in sequenced negative control samples - https://microbiomejournal.biomedcentral.com/articles/10.1186/s40168-018-0605-2
+
+# The test data associated with this markdown file is from the top 10,000 OTUs from our study on elk microbiota - https://pmc.ncbi.nlm.nih.gov/articles/PMC10861794/
+
+```
+
+Setup: install and load packages, set seed
+
+```{r}
+
+# decontam and phyloseq must be installed in the following manner
+# all other packages can be installed using install.packages
+
+# if (!requireNamespace("BiocManager"))
+# install.packages("BiocManager")
+# BiocManager::install("phyloseq")
+# BiocManager::install("decontam")
+
+library(phyloseq)
+library(vegan)
+library(ggpubr)
+library(scales)
+library(grid)
+library(reshape2)
+library(data.table)
+library(stringr)
+library(splitstackshape)
+library(viridis)
+library(tidyverse)
+library(decontam)
+library(gridExtra)
+library(ggsignif)
+library(svglite)
+library(cowplot)
+library(sf)
+
+# Change output from scientific notation to readable format
+options(scipen=999)
+
+# Add random number for reproducibility
+# Number generated from random.org - Min: 100000, Max: 999999, Date: 2024-11-04 22:44:30 UTC
+set.seed(392941)
+
+```
+
+Creating a dataframe with all taxonomy information for later use
+
+```{r}
+
+# Import the cons.taxonomy file produced by mothur
+tax <- read.table("taxonomy/test_taxonomy.taxonomy", header = TRUE)
+
+# Make a list of characters representing the bootstrap values produced in the cons.taxonomy file
+bootstraps <- c("(100)", "(99)", "(98)", "(97)", "(96)", "(95)", "(94)", "(93)", "(92)", "(91)", "(90)", "(89)", "(88)", "(87)", "(86)", "(85)", "(84)", "(85)", "(84)", "(83)", "(82)", "(81)", "(80)", "(79)", "(78)", "(77)", "(76)", "(75)", "(74)", "(73)", "(72)", "(71)", "(70)", "(69)", "(68)", "(67)", "(66)", "(65)", "(64)", "(63)", "(62)", "(61)", "(60)", "(59)", "(58)", "(57)", "(56)", "(55)", "(54)", "(53)", "(52)", "(51)")
+
+# Create a function that will allow a grep command to escape any important characters
+# Need to escape the "()" in the bootstrap values so they will be considered a character and deleted
+regex.escape <- function(string) {
+  gsub("([][{}()+*^${|\\\\?])", "\\\\\\1", string)
+}
+
+# Generate a list containing the escapes and a pipe character between each value
+bootstrap_input <- paste0("\\b", paste0(regex.escape(bootstraps), collapse="|"), "\\b")
+
+# Use gsub to find and replace all values in the input list from above and replace them with nothing
+tax$Taxonomy <- gsub(bootstrap_input, "", tax$Taxonomy)
+
+# Delimit file into columns by the semicolon
+tax <- cSplit(data.frame(tax), "Taxonomy", sep=";", drop=TRUE)
+
+# Rename columns with taxonomic ranks
+names(tax)[3:8] <- c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus")
+
+```
+
+Generating initial phyloseq object from Mothur output
+
+```{r}
+
+# Import the .shared and .taxonomy files from Mothur into a single phyloseq object
+# These contain the  abundances and taxonomy information, respectively, for each OTU
+data <- import_mothur(mothur_shared_file = "shared/test_shared.shared", 
+                      mothur_constaxonomy_file = "taxonomy/test_taxonomy.taxonomy")
+
+# Import metadata table and convert to a phyloseq object
+map <- sample_data(read.csv("design/test_design.csv"))
+
+# Name the rows to correspond with the SampleID column within the metadata
+rownames(map) <- map$Sample
+
+# Merge the shared-taxonomy phyloseq object with the metadata file (map) 
+data_merge <- merge_phyloseq(data, map)
+
+# Assign taxonomic rankings
+colnames(tax_table(data_merge)) <- c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus")
+
+# Clean up
+remove(data, map, bootstrap_input, bootstraps)
+
+save.image("initial_phyloseq.RData")
+
+```
+
+Run Decontam to identify and remove likely contaminants from the dataset
+
+```{r}
+
+# Use decontam package (https://github.com/benjjneb/decontam) - vignette: https://benjjneb.github.io/decontam/vignettes/decontam_intro.html
+
+# Begin by visualizing the data
+# True samples and controls generally have different library sizes
+    # Samples are typically larger than controls
+    # Less true for low-biomass samples
+
+# Pull sample data into a dataframe and calculate library size for all samples
+df <- as.data.frame(sample_data(data_merge))
+df$LibrarySize <- sample_sums(data_merge)
+
+# Order the dataframe by library size, then give each sample a numerical index based on order
+df <- df[order(df$LibrarySize),]
+df$Index <- seq(nrow(df))
+
+# Plot library size vs sample or control
+ggplot(data=df, aes(x=Index, y=LibrarySize, color=Type)) + geom_point()
+
+###########################
+
+# The control and samples are separated by library size
+    # As expected, the controls are smaller than the samples
+
+# Frequency method of Decontam might work for this study as it's not terribly low biomass
+# However, the frequency method requires DNA concentrations for EACH WELL in the sequenced plates
+# Prevalence method will still work, so going to use this instead
+# Decontam can only take 1 fixed effect in the model, so using plate ID
+
+###########################
+
+
+# Use the prevalence only method to generate a P score for every OTU
+# Our controls are labeled as "Control" in the Sequencing_Control column of the metadata
+sample_data(data_merge)$is.neg <- sample_data(data_merge)$Sequencing_Control == "Control"
+contamdf.prev <- isContaminant(data_merge, method = "prevalence",
+                               neg = "is.neg",
+                               batch = data_merge@sam_data$Plate)
+table(contamdf.prev$contaminant)
+
+# Make a histogram of all P scores
+# Ideally, OTUs should separate into a bimodal distribution by P score
+    # Scores closer to 0 indicate a contaminant
+    # Bimodality indicates that Decontam can confidently differentiate between contaminants and true OTUs
+    # https://github.com/benjjneb/decontam/issues/41 - decontam author recommends cutting the lower bimodality by setting the threshold to right before the upper bimodality
+        # this is a more aggressive method
+            # it should remove most/all likely contaminants, but it might remove some real taxa as well
+            # think about how best to assess your research - is it better to remove all contaminants to be on the safe side?
+
+# lines 189 - 191 need to be run simultaneously
+pdist <- as_data_frame(contamdf.prev)$p.prev
+hist(pdist, breaks = 100)
+axis(side=1, at=seq(0,1,0.1))
+
+###########################
+
+# for this dataset, there is a break at 0.575, so we'll manually set the threshold there
+
+###########################
+
+
+# Rerun the isContaminant function using the chosen threshold
+final_contamdf.prev <- isContaminant(data_merge, method = "prevalence",
+                               neg = "is.neg",
+                               batch = data_merge@sam_data$Plate,
+                               threshold = 0.575)
+
+table(final_contamdf.prev$contaminant)
+
+# Make phyloseq object of presence-absence of OTUs in negative controls and true samples
+    # If abundance is greater than 0, set it to 1
+    # If abundance is 0, it is set to 0
+ps.pa <- transform_sample_counts(data_merge, function(abund) 1*(abund>0))
+
+# Split this phyloseq object into separate objects depending on whether it was a sample or control
+ps.pa.neg <- prune_samples(sample_data(ps.pa)$Sequencing_Control == "Control", ps.pa)
+ps.pa.pos <- prune_samples(sample_data(ps.pa)$Sequencing_Control == "Sample", ps.pa)
+
+# Make dataframe of total prevalence of an OTU in positive and negative samples
+
+df.pa <- data.frame(pa.pos=taxa_sums(ps.pa.pos), pa.neg=taxa_sums(ps.pa.neg),
+                    contaminant=final_contamdf.prev$contaminant)
+
+# # Create a better histogram with the cutoff value
+# ggplot(data=df.pa, aes(x=pa.neg, y=pa.pos, color=contaminant)) + geom_point() +
+#   xlab("Prevalence (Negative Controls)") + ylab("Prevalence (True Samples)") + 
+#   geom_abline(slope=1, intercept=0) +
+#   xlim(c(min(c(df.pa$pa.neg,df.pa$pa.pos)),
+#          max(c(df.pa$pa.neg, df.pa$pa.pos)))) +
+#   ylim(c(min(c(df.pa$pa.neg,df.pa$pa.pos)),
+#          max(c(df.pa$pa.neg, df.pa$pa.pos))))
+# 
+# ggplot(data=contamdf.prev, aes(x=p)) +
+#   geom_histogram() +
+#   geom_vline(xintercept=0.575)
+
+# Output the removed contaminants
+contam <- prune_taxa((df.pa$contaminant), data_merge)
+pscores <- as_tibble(final_contamdf.prev[,c(1,5)], rownames = "OTU")
+contaminants <- 
+  left_join((left_join((as_tibble(rownames(contam@otu_table))), tax, c("value" = "OTU"))), 
+                          pscores[,c(1,3)], c("value" = "OTU"))
+fwrite(select(contaminants,1,2,9,3:8), "removed_contaminants.csv")
+
+# Remove the contaminants and controls from the dataset
+decon <- prune_taxa(!(df.pa$contaminant), data_merge)
+decon <- prune_samples(data_merge@sam_data$Sequencing_Control == "Sample", decon)
+
+# make the decontaminated data set our main data set
+data_merge_decon <- decon
+
+# Clean up
+remove(contamdf.prev, contam, contaminants, decon, df, df.pa, final_contamdf.prev, ps.pa, ps.pa.neg, ps.pa.pos, pdist)
+
+```
+
+Remove OTUs which are represented by less than <10 reads
+Run basic statistics on reads per sample
+
+```{r}
+
+# Check the number of OTUs before pruning
+taxa_sum_df <- data.frame(sum = taxa_sums(data_merge_decon))
+
+# Pruning the taxa so only OTUs with more than 10 sequences per read remain
+data_sub <- data_merge_decon %>%
+  prune_taxa(taxa_sums(.) > 9, .)
+
+# Check the number of OTUs left after pruning
+pruned_taxa_sum_df <- data.frame(sum = taxa_sums(data_sub))
+
+# Find the sum of sequences in filtered dataset
+total_trimmed_seqs <- sum(pruned_taxa_sum_df)
+
+# Change and check the taxonomic rankings in the subset data
+colnames(tax_table(data_sub)) <- c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus")
+colnames(tax_table(data_sub))
+
+# Check the number of OTUs before pruning
+taxa_sum_df <- data.frame(sum = taxa_sums(data_sub))
+
+# List the number of reads per sample
+sample_sum_df <- data.frame(sum = sample_sums(data_sub))
+(LOWEST_SAMPLE_SIZE <- min(sample_sum_df))
+
+# Calculate the average sequence length and standard deviation
+(average_sequencing_depth <- mean(sample_sum_df$sum))
+(standard_deviation_of_sequencing_depth <- sd(sample_sum_df$sum))
+
+# Plot the above
+seq_depth <- ggplot(sample_sum_df, aes(x = sum)) + 
+  geom_histogram(color = "black", fill = "indianred", binwidth = 2500) +
+  xlab("Read counts") +
+  theme(axis.title.y = element_blank(), text = element_text(family = "sans"))
+
+seq_depth
+#ggsave("output/high_res/sequencing_depth.svg", plot = seq_depth)
+
+# Export read data
+#write.csv(sample_sum_df, file = "Sample_sum_df.csv", row.names = FALSE, quote = FALSE)
+
+# Take pruned, decontaminated data and generate the final dataset
+data_final <- data_sub
+
+# Output the final dataset
+final_taxa <- 
+  left_join((left_join((as_tibble(rownames(data_final@otu_table))), tax, c("value" = "OTU"))), 
+                          pscores[,c(1,3)], c("value" = "OTU"))
+fwrite(select(final_taxa,1,2,9,3:8), "final_dataset.csv")
+
+# Clean up
+remove(pruned_taxa_sum_df, pscores, sample_sum_df, seq_depth, taxa_sum_df)
+
+# Save the environment as an .Rdata file that we can use as the basis for downstream analyses
+save.image("post_decontam_filtering_phyloseq.RData")
+
+```
+
+

@@ -1,0 +1,729 @@
+---
+title: "16S rRNA gene amplicon sequencing analysis - PCoA and most abundant taxa"
+output: html_document
+date: "2024-11-04"
+---
+
+Introduction and Notes
+
+```{r}
+
+#11-4-24
+
+# The below is based on code written by Dr. Lucas Koester, Chiron Anderson, Dr. Laura Tibbs-Cortes, and Faith Rahic-Seggerman
+
+# Prior to running this file, you should run through 1_phyloseq_and_data_processing.Rmd
+#   You will load the post_decontam_filtering_phyloseq.Rdata file to begin here
+
+# This markdown file will run PCoA analysis via Phyloseq
+#   Visualizes beta diversity (using Bray-Curtis dissimilarity)
+
+# It will also agglomerate OTUs/ASVs based on taxonomic ranking
+#   Phyla, family, and genus are included
+#   It will then graph the 10 most abundant taxa
+
+# The test data associated with this markdown file is from the top 10,000 OTUs from our study on elk microbiota
+#   https://pmc.ncbi.nlm.nih.gov/articles/PMC10861794/
+
+```
+
+Setup: install and load packages, set seed, load .Rdata
+
+```{r}
+
+# decontam and phyloseq must be installed in the following manner
+# all other packages can be installed using install.packages
+
+# if (!requireNamespace("BiocManager"))
+# install.packages("BiocManager")
+# BiocManager::install("phyloseq")
+# BiocManager::install("decontam")
+
+library(phyloseq)
+library(vegan)
+library(ggpubr)
+library(scales)
+library(grid)
+library(reshape2)
+library(data.table)
+library(stringr)
+library(splitstackshape)
+library(viridis)
+library(tidyverse)
+library(decontam)
+library(gridExtra)
+library(ggsignif)
+library(svglite)
+library(cowplot)
+library(sf)
+
+# Change output from scientific notation to readable format
+options(scipen=999)
+
+# Add random number for reproducibility
+# Number generated from random.org - Min: 100000, Max: 999999, Date: 2024-11-04 22:44:30 UTC
+set.seed(392941)
+
+# Load data
+load("post_decontam_filtering_phyloseq.Rdata")
+rm(list=setdiff(ls(), "data_final"))
+
+```
+
+Generate PCOA figures
+
+```{r}
+
+# Generate PCOA plots for comparisons of interest
+# Have to create PCOA object first from subsetted data of interest
+# Then plot
+
+# also need to reorder phyloseq object to get plot_ordination to order the legend correctly
+pcoaphyobj <- data_final
+sample_data(pcoaphyobj)$timeorder <-  data.frame(sample_data(pcoaphyobj)) %>%
+  mutate(timeorder = case_when(Time %in% "D0" ~ "0D0",
+                               Time %in% "2wkpre" ~ "12W",
+                               Time %in% "precalve" ~ "2Precalve",
+                               Time %in% "postcalve" ~ "3Postcalve",
+                               Time %in% "necro" ~ "4Necropsy"
+                               )) %>% pull(timeorder)
+  
+################# vaginal:
+# Perform ordination
+    data_pcoa1 <- ordinate(
+      physeq = prune_samples(pcoaphyobj@sam_data$Type=="Vaginal", pcoaphyobj),
+      method = "PCoA", # NOTE can also do PCA, etc instead
+      distance = "bray"
+    )
+
+# Perform base plotting
+    vag_time =  plot_ordination(
+      physeq = prune_samples(pcoaphyobj@sam_data$Type=="Vaginal",pcoaphyobj),
+      ordination = data_pcoa1,
+      color = "timeorder",
+      shape = "Vax_Status",
+      title = "Vaginal Samples" # by Time and Vaccination Status"
+    )
+
+    vag_time
+
+################ fecal:
+    data_pcoa2 <- ordinate(
+      physeq = prune_samples(pcoaphyobj@sam_data$Type=="Fecal",pcoaphyobj),
+      method = "PCoA", # NOTE can also do PCA, etc instead
+      distance = "bray"
+    )
+
+    fec_time =  plot_ordination(
+      physeq = prune_samples(pcoaphyobj@sam_data$Type=="Fecal",pcoaphyobj),
+      ordination = data_pcoa2,
+      color = "timeorder",
+      shape = "Vax_Status",
+      title = "Fecal Samples" # by Time and Vaccination Status"
+    )
+
+    fec_time
+    
+################ all:
+    data_pcoa2 <- ordinate(
+      physeq = prune_samples(pcoaphyobj@sam_data$Sequencing_Control=="Sample",pcoaphyobj),
+      method = "PCoA", # NOTE can also do PCA, etc instead
+      distance = "bray"
+    )
+
+    vag_v_fec =  plot_ordination(
+      physeq = prune_samples(pcoaphyobj@sam_data$Sequencing_Control=="Sample",pcoaphyobj),
+      ordination = data_pcoa2,
+      color = "timeorder",
+      shape = "Type",
+      title = "Vaginal and Fecal Samples over Time"
+    )
+
+    vag_v_fec
+
+# Improve the plots
+    # takes one of the base PCoA plots generated above as its argument
+PCOA_plotting <- function(PCOAplot){
+
+  PCOAplot = PCOAplot + geom_point(size = 3, alpha = 0.6) +
+  scale_color_manual(values = c(#"#042333ff",
+    "#253582ff", "#6b4596ff", "#a65c85ff", "#de7065ff", "#f9a242ff")) +
+  #scale_color_viridis_d(option = "plasma") +
+  #stat_ellipse(type = "norm") +
+  theme_bw() +
+  theme(axis.title.x = element_text(size = 12)) +
+  theme(axis.title.y = element_text(size = 12)) +
+  theme(axis.text = element_text(size = 12)) +
+  theme(legend.text = element_text(size = 13)) +
+  theme(legend.title = element_text(size=13)) +
+  #xlim(-1.0, 1.0) +
+  theme(panel.grid.minor = element_blank())
+
+  PCOAplot
+}
+
+PCOA1 <- PCOA_plotting(vag_time)
+PCOA2 <- PCOA_plotting(fec_time)
+PCOA3 <- PCOA_plotting(vag_v_fec)
+
+PCOA1
+PCOA2
+PCOA3
+
+# ggsave("vaginal_PCOA.svg", plot = PCOA_plotting(vag_time), width = 20, height = 16, units = "cm")
+# ggsave("fecal_PCOA.svg", plot = PCOA_plotting(fec_time), width = 20, height = 16, units = "cm")
+# 
+# ggsave("combinedPCOA.svg", ggarrange(PCOA1, PCOA2, PCOA3, 
+#                                      labels = c("A", "B", "C"), ncol = 2, nrow = 2), width = 12, height = 9)
+
+```
+
+Since we're going to be agglomerating OTUs/ASVs based on taxonomic level using phyloseq's tax_glom function, we want to find what OTUs/ASVs are part of each taxon we agglomerate to
+
+```{r}
+
+# from G-EC at https://github.com/joey711/phyloseq/issues/866
+glomping <- function(physeqobj, taxlevel) {
+  glomped <- which(rank_names(physeqobj) %in% taxlevel)
+  glom_tax <- as(access(physeqobj, "tax_table"), "matrix")[, glomped]
+  
+  glom_tax <- as(access(physeqobj, "tax_table"), "matrix")[, 1:glomped, drop = FALSE]
+  glom_tax <- apply(glom_tax, 1, function(i) {paste(i, sep = ";_;", collapse = ";_;")})
+  
+  bad_empty <- c(NA, "", " ", "\t")
+  glom_tax <- glom_tax[!(glom_tax %in% bad_empty)]
+  
+  spCliques <- tapply(names(glom_tax), factor(glom_tax), list)
+  glom_df <- as.data.frame(do.call(cbind, spCliques)) %>% map_dfr(~replace(., duplicated(.), NA))
+  
+  write.csv(glom_df, paste0("agglomeration_", taxlevel, ".csv"))
+}
+
+glomping(data_final, "Genus")
+glomping(data_final, "Family")
+
+```
+
+Determining most abundant phyla and preparing for phylum visualizations
+
+```{r}
+# Phylum analysis
+
+# Group all the data into phylum level
+# Transform to relative abundance
+# Melt to long format and sort alphabetically
+data_phylum_only <- data_final %>% tax_glom(taxrank = "Phylum")
+data_phylum_sorted <- data_phylum_only %>% transform_sample_counts(function(x) {(x/sum(x))}) %>% psmelt() %>% arrange(Phylum)
+
+# Display # different phyla and # of samples containing a phylum
+number_of_phyla <- as.data.frame(data_phylum_sorted %>% group_by(Phylum) %>% summarize(count=n()))
+
+# Determine the number of sequences within each phylum and their % abundance
+# Begin by calculating the sum of sequences for each phylum
+pruned_phylum_sum_df <- data.frame(sum = taxa_sums(data_phylum_only))
+
+# Make a list containing only the unique phylum level entries
+phyla_list <- as.list(get_taxa_unique(data_phylum_only, taxonomic.rank=rank_names(data_phylum_only)[2], errorIfNULL=TRUE))
+
+#make those phyla the row names
+row.names(pruned_phylum_sum_df) <- phyla_list
+
+# Add a row with the relative abundances of each phyla
+pruned_phylum_sum_df$relative_abundance <- (pruned_phylum_sum_df$sum/sum(pruned_phylum_sum_df$sum)*100)
+
+# Order the phyla by relative abundance
+pruned_phylum_sum_df <- pruned_phylum_sum_df[order(-pruned_phylum_sum_df$relative_abundance),]
+
+# Convert to data table for exporting via write.xlsx
+pruned_phylum_sum_df <- setDT(pruned_phylum_sum_df, keep.rownames = TRUE)[]
+
+# Change name of the first column to phyla
+names(pruned_phylum_sum_df)[1] <- "phyla"
+
+write.csv(pruned_phylum_sum_df, file = "phyloseq_relative_abundance_phylum.csv", row.names = TRUE, quote = FALSE)
+
+# Make a list of the 10 most abundant phyla names
+top_10_phylum <- as.list(pruned_phylum_sum_df$phyla[1:10])
+
+# Create matrix from the phyloseq object (maybe could have went straight with data.frame here)
+phylum_shared <- as(otu_table(data_phylum_only), "matrix")
+# Convert from a matrix to a data frame
+phylum_shared = as.data.frame(phylum_shared)
+# Make the row names of this object the phyla listed above
+row.names(phylum_shared) <- phyla_list
+
+#creating a phylum level shared file with the added phyla names
+write.csv(phylum_shared, file = "phylum_shared.csv", row.names = TRUE, quote = FALSE)
+
+```
+
+Function for creating phylum plots
+
+```{r}
+
+# Phylum level plots - Luke and Chiron versions
+# Will be subsetting the data
+# Make a function to create top 10 phyla for the subset and then plot those
+
+# phylum_phyloseq - the phyloseq object tthat will be agglomerated and analyzed
+# merge_var - a string corresponding to one of the columns in the sam_data list of the phyloseq object
+#     will merge samples based on this column
+#     in this case, we will merge all samples that are replicates of the same condition
+# title - title for the plot
+phylaplot <- function(phylum_phyloseq, merge_var, title) {
+
+    # Begin by calculating the sum of sequences for each phylum
+    pruned_phylum_sum_df <- data.frame(sum = taxa_sums(phylum_phyloseq))
+
+    # Make a list containing only the unique phylum level entries
+    phyla_list <- as.list(get_taxa_unique(data_phylum_only, taxonomic.rank=rank_names(data_phylum_only)[2], errorIfNULL=TRUE))
+
+    #make those phyla the row names
+    row.names(pruned_phylum_sum_df) <- phyla_list
+
+    # Add a row with the relative abundances of each phyla
+    pruned_phylum_sum_df$relative_abundance <- (pruned_phylum_sum_df$sum/sum(pruned_phylum_sum_df$sum)*100)
+
+    # Order the phyla by relative abundance
+    pruned_phylum_sum_df <- pruned_phylum_sum_df[order(-pruned_phylum_sum_df$relative_abundance),]
+
+    # Convert to data table
+    pruned_phylum_sum_df <- setDT(pruned_phylum_sum_df, keep.rownames = TRUE)[]
+
+    # Change name of the first column to phyla
+    names(pruned_phylum_sum_df)[1] <- "phyla"
+
+    # Make a list of the 10 most abundant phyla names
+    top_10_phylum <- as.list(pruned_phylum_sum_df$phyla[1:10])
+
+  # Take grouped phylum data and convert to relative abundance
+  # Use merge_samples to combine the abundances of samples of the same group
+  data_phylum_subset <- phylum_phyloseq %>%
+    transform_sample_counts(function(x) {(x/sum(x))} ) %>%
+    merge_samples(paste(merge_var)) %>%
+
+    # Then, we need to convert to proportions again, since the total abundance of each SampleType will equal the number of samples that were merged
+    transform_sample_counts(function(x) {(x/sum(x))*100} ) %>%
+
+    # Melt to long format and sort alphabetically by phylum
+    psmelt() %>% arrange(Phylum)
+
+  #
+  data_phylum_t10 <- data_phylum_subset[data_phylum_subset$Phylum %in% top_10_phylum,]
+
+  # Generate phylum plot
+  ggplot(data_phylum_t10, aes(x = Sample, y = Abundance, fill = Phylum)) +
+
+    # Facet to split graph by Type (vaginal or fecal)
+    # need to remove the box that comes witht he faceting
+    facet_wrap(Type~., scales = 'free', nrow = 1) +
+    theme(strip.background = element_blank()) +
+
+    #this specifies that you would like to use a bar graph that has gray outlines
+    geom_bar(stat = "identity", colour = "gray68", size = 0.25) +
+
+    scale_fill_manual(values = c("white", "#FFFFCC", "#f0f921", "#fccd25", "#f79044", 
+                                 "#dd5e66", "#b6308b", "#6e00a8", "#0d0887", "black")) +
+
+    #this option includes the sampleIDs along the x-Axis
+    theme(axis.title.x = element_blank(), axis.text.x = element_text(vjust=0.5, angle = 90)) +
+
+    #this option excludes the sampleIDS from the x-axis
+    #theme(axis.title.x = element_blank(), axis.text.x = element_blank(), axis.ticks.x=element_blank()) +
+
+    # now for a bunch of formatting stuff
+    guides(fill = guide_legend(keywidth = 1, keyheight = 1)) +
+    ylab("Relative Abundance (%) \n") +
+    ylim(0,100) +
+    ggtitle(paste0(title)) +
+    theme_bw() +
+    theme(panel.grid = element_blank(), axis.title.x = element_blank()) +
+    theme(axis.text.x = element_text(size=14, angle = 45, vjust = 1.05, hjust = 1.1)) +
+    theme(axis.title.y = element_text(size=14)) +
+    theme(axis.text.y = element_text(size = 14)) +
+    theme(legend.text = element_text(size = 14)) +
+    theme(legend.text = element_text(face="italic")) +
+    theme(legend.title = element_text(size = 14)) +
+    scale_y_continuous(expand = c(0,0), limits = c(0,105), breaks = seq(0, 110, 25)) +
+    
+  
+    # need to remove the box that comes with the faceting
+    theme(strip.background = element_blank()) +
+    theme(strip.text.x = element_blank())
+
+}
+
+# p1 <- phylaplot(data_phylum_only, "Replicate_ID")
+# 
+# p1
+
+p2 <- phylaplot(prune_samples(data_phylum_only@sam_data$Type=="Vaginal", data_phylum_only), "Replicate_ID", "Vaginal Phyla")
+
+vaginalorder <- c("V_C_D0", "V_C_2W", "V_C_PRECALV", "V_C_POST", "V_C_NECRO",
+                  "V_R_D0", "V_R_2W", "V_R_PRECALV", "V_R_POST", "V_R_NECRO")
+
+labels <- c("Cont D0", "Cont 2W", "Cont Precalve", "Cont Postcalve", "Cont Necro",
+                  "RB51 D0", "RB51 2W", "RB51 Precalve", "RB51 Postcalve", "RB51 Necro")
+
+p2 <- p2 + scale_x_discrete(limits = vaginalorder, labels = labels)
+p2
+
+p3 <- phylaplot(prune_samples(data_phylum_only@sam_data$Type=="Fecal", data_phylum_only), "Replicate_ID", "Fecal Phyla")
+
+fecalorder <- c("F_C_D0", "F_C_2W", "F_C_PRECALV", "F_C_POST", "F_C_NECRO",
+                  "F_R_D0", "F_R_2W", "F_R_PRECALV", "F_R_POST", "F_R_NECRO")
+
+p3 <- p3 + scale_x_discrete(limits = fecalorder, labels = labels)
+p3
+
+```
+
+Determining most abundant genera and preparing for genus visualizations
+
+```{r}
+# Group all the data into genus level
+# Transform to relative abundance
+# Melt to long format and sort alphabetically
+data_genus_only <- data_final %>% tax_glom(taxrank = "Genus")
+
+#I also want to see the number of of sequences within each genus and their % abundance
+pruned_genus_sum_df <- data.frame(sum = taxa_sums(data_genus_only))
+
+pruned_genus_sum_df <- setDT(pruned_genus_sum_df, keep.rownames = TRUE)[]
+#naming the new row "OTU"
+names(pruned_genus_sum_df)[1] <- "OTU"
+
+merged_genus_list <- merge(x = pruned_genus_sum_df, y = tax[ , c("OTU", "Genus")], by = "OTU", all.x=TRUE)
+#calculating relative abundance (currently of the subset data)
+merged_genus_list$relative_abundance <- (merged_genus_list$sum/sum(merged_genus_list$sum)*100)
+#ordering the genera based on relative abundance
+merged_genus_list <- merged_genus_list[order(-merged_genus_list$relative_abundance),]
+merged_genus_list <- data.frame(lapply(merged_genus_list, as.character), stringsAsFactors=FALSE)
+
+#write to csv
+write.csv(merged_genus_list, file = "relative_abundance_genus.csv", row.names = TRUE, quote = FALSE)
+
+#make a top 10 list
+top_10_genus <- as.list(merged_genus_list$Genus[1:10])
+
+#### MAKE GENUS SHARED!!!
+data_genus_SH <- data_final %>%
+  tax_glom(taxrank = "Genus")
+genus_shared <- as(otu_table(data_genus_SH), "matrix")
+#converting it from a matrix to a data frame
+genus_shared = as.data.frame(genus_shared)
+#move OTU labels to column
+genus_shared$OTUList <- row.names(genus_shared)
+#genus_shared_IDs <- merge(x = genus_shared , y = tax[, c("OTU", "Genus")], by.x = "OTUList", by.y = "OTU", all.x = TRUE, all.y = F)
+genus_shared_IDs <- merge(x = tax[, c("OTU", "Genus")] , y = genus_shared, by.x = "OTU", by.y = "OTUList", all.x = F, all.y = T)
+
+#creating a genus level shared file with the added genus names- note that this is *not* identical to the normal shared format, as the genus labels are added as an additional column.
+write.csv(genus_shared_IDs, file = "genus_shared.csv", row.names = F, quote = FALSE)
+
+```
+
+Function for creating genus plots
+
+```{r}
+
+# genus_phylo - the phyloseq object that will be agglomerated and analyzed
+# merge_var - a string corresponding to one of the columns in the sam_data list of the phyloseq object
+#     will merge samples based on this column
+#     in this case, we will merge all samples that are replicates of the same condition
+# title - title for the plot
+
+genusplot <- function(genus_phylo, merge_var, title){
+
+    #I also want to see the number of of sequences within each genus and their % abundance
+  pruned_genus_sum_df <- data.frame(sum = taxa_sums(genus_phylo))
+
+  pruned_genus_sum_df <- setDT(pruned_genus_sum_df, keep.rownames = TRUE)[]
+  #naming the new row "OTU"
+  names(pruned_genus_sum_df)[1] <- "OTU"
+
+  merged_genus_list <- merge(x = pruned_genus_sum_df, y = tax[ , c("OTU", "Genus")], by = "OTU", all.x=TRUE)
+  #calculating relative abundance (currently of the subset data)
+  merged_genus_list$relative_abundance <- (merged_genus_list$sum/sum(merged_genus_list$sum)*100)
+  #ordering the genera based on relative abundance
+  merged_genus_list <- merged_genus_list[order(-merged_genus_list$relative_abundance),]
+  merged_genus_list <- data.frame(lapply(merged_genus_list, as.character), stringsAsFactors=FALSE)
+
+  #make a top 10 list
+  top_10_genus <- as.list(merged_genus_list$Genus[1:10])
+
+  #I have to subset the the data set one more time
+  data_genus_subset <- genus_phylo %>%
+    tax_glom(taxrank = "Genus") %>%
+
+    transform_sample_counts(function(x) {(x/sum(x))} ) %>%
+
+    merge_samples(paste(merge_var)) %>%
+
+    transform_sample_counts(function(x) {(x/sum(x))*100} ) %>%
+    # Transform to rel. abundance
+    psmelt() %>%
+    # Melt to long format
+    arrange(Genus)
+  # Sort data frame alphabetically by phylum
+
+  #once again, we will need to remove all but the 10 most abundant genera (this can be modified)
+  data_genus_subset <- data_genus_subset[data_genus_subset$Genus %in% top_10_genus,]
+
+  ggplot(data_genus_subset, aes(x = Sample, y = Abundance, fill = Genus)) +
+    #this specifies that you would like to use a bar graph that has black outlines
+    facet_wrap(Type~., scales = 'free', nrow = 1) +
+
+
+    geom_bar(stat = "identity", colour = "gray68", size = 0.25) +
+    #scale_fill_viridis_d(option = "viridis") +
+    scale_fill_manual(values = c("#FFFFEF", "#FFF69C", "#fde725", "#c0df25", "#75d054",  
+                                 "#20a386", "#33638d", "#453781", "#440154", "#290033")) +
+
+    theme(axis.title.x = element_blank(), axis.text.x = element_text(vjust=0.5, angle = 90)) +
+    #scale_fill_manual(values=newpalette) +
+
+    #scale_fill_viridis_d(option = "B") + #this is an alternative to the above scale fill
+    #viridis is really nice for generating colorblind friendly figures with nice separation of color
+    #to add this option, remove the # before "scale_fill_viridis" and a # before "scale_fill_manual"
+
+    guides(fill = guide_legend(keywidth = 1, keyheight = 1)) +
+
+    ylab("Relative Abundance (%) \n") +
+
+    #xlab("INPUT") +
+    
+    ylim(0,100) +
+    ggtitle(paste0(title)) +
+    theme_bw() +
+    theme(panel.grid = element_blank(), axis.title.x = element_blank()) +
+    theme(axis.text.x = element_text(size=14, angle = 45, vjust = 1.05, hjust = 1.1)) +
+    theme(axis.title.y = element_text(size=14)) +
+    theme(axis.text.y = element_text(size = 14)) +
+    theme(legend.text = element_text(size = 12)) +
+    theme(legend.text = element_text(face="italic")) +
+    theme(legend.title = element_text(size = 14)) +
+    scale_y_continuous(expand = c(0,0), limits = c(0,105), breaks = seq(0, 110, 25)) +
+  
+    # need to remove the box that comes with the faceting
+    theme(strip.background = element_blank()) +
+    theme(strip.text.x = element_blank())
+}
+
+# g1 <- genusplot(data_genus_only, "Replicate_ID")
+# 
+# g1
+
+g2 <- genusplot(prune_samples(data_genus_only@sam_data$Type=="Vaginal", data_genus_only), "Replicate_ID", "Vaginal Genera")
+
+vaginalorder <- c("V_C_D0", "V_C_2W", "V_C_PRECALV", "V_C_POST", "V_C_NECRO",
+                  "V_R_D0", "V_R_2W", "V_R_PRECALV", "V_R_POST", "V_R_NECRO")
+
+g2 <- g2 + scale_x_discrete(limits = vaginalorder, labels = labels)
+g2
+
+g3 <- genusplot(prune_samples(data_genus_only@sam_data$Type=="Fecal", data_genus_only), "Replicate_ID", "Fecal Genera")
+
+fecalorder <- c("F_C_D0", "F_C_2W", "F_C_PRECALV", "F_C_POST", "F_C_NECRO",
+                  "F_R_D0", "F_R_2W", "F_R_PRECALV", "F_R_POST", "F_R_NECRO")
+
+g3 <- g3 + scale_x_discrete(limits = fecalorder, labels = labels)
+g3
+
+
+```
+
+Determining most abundant families and preparing for family visualizations
+
+```{r}
+# family analysis accounting for ALL samples (no subsetting)
+
+# Group all the data into family level
+# Transform to relative abundance
+# Melt to long format and sort alphabetically
+data_family_only <- data_final %>% tax_glom(taxrank = "Family")
+# data_family_sorted <- data_family_only %>% transform_sample_counts(function(x) {(x/sum(x))}) %>% psmelt() %>% arrange(Family)
+# 
+# # Display # different families and # of samples containing a family
+# number_of_families <- as.data.frame(data_family_sorted %>% group_by(Family) %>% summarize(count=n()))
+
+# Determine the number of sequences within each family and their % abundance
+# Begin by calculating the sum of sequences for each family
+pruned_family_sum_df <- data.frame(sum = taxa_sums(data_family_only))
+
+# Make a list containing only the unique family level entries
+# for the family level, the commented out code below will be problematic if there are multiple "uncultured" families
+#famlist <- as.list(get_taxa_unique(data_family_only, taxonomic.rank=rank_names(data_family_only)[5], errorIfNULL=TRUE))
+
+# to get around this, don't use get_taxa_unique
+  # instead, concatenate the order name to the family name if the family is uncultured
+famtab <- as.data.frame(data_family_only@tax_table)
+modfamtab <- famtab %>% mutate(uncultured_orders = case_when(
+                            grepl("uncultured", Family) ~ paste0(Order, "_", Family),
+                            .default = Family))
+
+families_list <- as.list(modfamtab$uncultured_orders)
+
+#make those families the row names
+row.names(pruned_family_sum_df) <- families_list
+
+# Add a row with the relative abundances of each families
+pruned_family_sum_df$relative_abundance <- (pruned_family_sum_df$sum/sum(pruned_family_sum_df$sum)*100)
+
+# Order the families by relative abundance
+pruned_family_sum_df <- pruned_family_sum_df[order(-pruned_family_sum_df$relative_abundance),]
+
+# Convert to data table for exporting via write.xlsx
+pruned_family_sum_df <- setDT(pruned_family_sum_df, keep.rownames = TRUE)[]
+
+# Change name of the first column to families
+names(pruned_family_sum_df)[1] <- "families"
+
+ write.csv(pruned_family_sum_df, file = "phyloseq_relative_abundance_family.csv", row.names = TRUE, quote = FALSE)
+
+# Make a list of the 10 most abundant families names
+top_10_family <- as.list(pruned_family_sum_df$families[1:10])
+
+# Create matrix from the phyloseq object (maybe could have went straight with data.frame here)
+family_shared <- as(otu_table(data_family_only), "matrix")
+# Convert from a matrix to a data frame
+family_shared = as.data.frame(family_shared)
+# Make the row names of this object the families listed above
+row.names(family_shared) <- families_list
+
+#creating a family level shared file with the added families names
+write.csv(family_shared, file = "family_shared.csv", row.names = TRUE, quote = FALSE)
+
+```
+
+Function for creating family plots
+
+```{r}
+
+# family level plots - Luke and Chiron versions
+# Will be subsetting the data
+# Make a function to create top 10 families for the subset and then plot those
+
+# family_phyloseq - the phyloseq object that will be agglomerated and analyzed
+# merge_var - a string corresponding to one of the columns in the sam_data list of the phyloseq object
+#     will merge samples based on this column
+#     in this case, we will merge all samples that are replicates of the same condition
+# title - title for the plot
+familiesplot <- function(family_phyloseq, merge_var, title) {
+
+      # Begin by calculating the sum of sequences for each family
+    pruned_family_sum_df <- data.frame(sum = taxa_sums(family_phyloseq))
+
+    # Make a list containing only the unique family level entries
+    # for the family level, the commented out code below will be problematic if there are multiple "uncultured"     families
+    #famlist <- as.list(get_taxa_unique(family_phyloseq, taxonomic.rank=rank_names(family_phyloseq)[5], errorIfNULL=TRUE))
+    
+    # to get around this, don't use get_taxa_unique
+      # instead, concatenate the order name to the family name if the family is uncultured
+    famtab <- as.data.frame(family_phyloseq@tax_table)
+    modfamtab <- famtab %>% mutate(uncultured_orders = case_when(
+                                grepl("uncultured", Family) ~ paste0(Order, "_", Family),
+                                .default = Family))
+    
+    families_list <- as.list(modfamtab$uncultured_orders)
+    
+    #make those families the row names
+    row.names(pruned_family_sum_df) <- families_list
+
+    # Add a row with the relative abundances of each families
+    pruned_family_sum_df$relative_abundance <- (pruned_family_sum_df$sum/sum(pruned_family_sum_df$sum)*100)
+
+    # Order the families by relative abundance
+    pruned_family_sum_df <- pruned_family_sum_df[order(-pruned_family_sum_df$relative_abundance),]
+
+    # Convert to data table
+    pruned_family_sum_df <- setDT(pruned_family_sum_df, keep.rownames = TRUE)[]
+
+    # Change name of the first column to families
+    names(pruned_family_sum_df)[1] <- "families"
+
+    # Make a list of the 10 most abundant families names
+    top_10_family <- as.list(pruned_family_sum_df$families[1:10])
+
+  # Take grouped family data and convert to relative abundance
+  # Use merge_samples to combine the abundances of samples of the same group
+  data_family_subset <- family_phyloseq %>%
+    transform_sample_counts(function(x) {(x/sum(x))} ) %>%
+    merge_samples(paste(merge_var)) %>%
+
+    # Then, we need to convert to proportions again, since the total abundance of each SampleType will equal the number of samples that were merged
+    transform_sample_counts(function(x) {(x/sum(x))*100} ) %>%
+
+    # Melt to long format and sort alphabetically by family
+    psmelt() %>% arrange(Family)
+
+  #
+  data_family_t10 <- data_family_subset[data_family_subset$Family %in% top_10_family,]
+
+  # Generate family plot
+  ggplot(data_family_t10, aes(x = Sample, y = Abundance, fill = Family)) +
+
+    # Facet to split graph by Type (vaginal or fecal)
+    # need to remove the box that comes witht he faceting
+    facet_wrap(Type~., scales = 'free', nrow = 1) +
+    theme(strip.background = element_blank()) +
+
+    #this specifies that you would like to use a bar graph that has gray outlines
+    geom_bar(stat = "identity", colour = "gray68", size = 0.25) +
+
+    scale_fill_manual(values = c("white", "#FFFFCC", "#f0f921", "#fccd25", "#f79044", 
+                                 "#dd5e66", "#b6308b", "#6e00a8", "#0d0887", "black")) +
+
+    # Remove x axis title and add a text angle to the x ticks. Additionally, I added a general text change to sans type fonts
+
+    #this option includes the sampleIDs along the x-Axis
+    theme(axis.title.x = element_blank(), axis.text.x = element_text(vjust=0.5, angle = 90)) +
+
+    #this option excludes the sampleIDS from the x-axis
+    #theme(axis.title.x = element_blank(), axis.text.x = element_blank(), axis.ticks.x=element_blank()) +
+
+    # now for a bunch of formatting stuff
+    guides(fill = guide_legend(keywidth = 1, keyheight = 1)) +
+    ylab("Relative Abundance (%) \n") +
+    ylim(0,100) +
+    ggtitle(paste0(title)) +
+    theme_bw() +
+    theme(panel.grid = element_blank(), axis.title.x = element_blank()) +
+    theme(axis.text.x = element_text(size=14, angle = 45, vjust = 1.05, hjust = 1.1)) +
+    theme(axis.title.y = element_text(size=14)) +
+    theme(axis.text.y = element_text(size = 14)) +
+    theme(legend.text = element_text(size = 14)) +
+    theme(legend.text = element_text(face="italic")) +
+    theme(legend.title = element_text(size = 14)) +
+    scale_y_continuous(expand = c(0,0), limits = c(0,105), breaks = seq(0, 110, 25)) +
+    
+  
+    # need to remove the box that comes with the faceting
+    theme(strip.background = element_blank()) +
+    theme(strip.text.x = element_blank())
+
+}
+
+
+f2 <- familiesplot(prune_samples(data_family_only@sam_data$Type=="Vaginal", data_family_only), "Replicate_ID", "Vaginal families")
+
+vaginalorder <- c("V_C_D0", "V_C_2W", "V_C_PRECALV", "V_C_POST", "V_C_NECRO",
+                  "V_R_D0", "V_R_2W", "V_R_PRECALV", "V_R_POST", "V_R_NECRO")
+
+labels <- c("Cont D0", "Cont 2W", "Cont Precalve", "Cont Postcalve", "Cont Necro",
+                  "RB51 D0", "RB51 2W", "RB51 Precalve", "RB51 Postcalve", "RB51 Necro")
+
+f2 <- f2 + scale_x_discrete(limits = vaginalorder, labels = labels)
+f2
+
+f3 <- familiesplot(prune_samples(data_family_only@sam_data$Type=="Fecal", data_family_only), "Replicate_ID", "Fecal families")
+
+fecalorder <- c("F_C_D0", "F_C_2W", "F_C_PRECALV", "F_C_POST", "F_C_NECRO",
+                  "F_R_D0", "F_R_2W", "F_R_PRECALV", "F_R_POST", "F_R_NECRO")
+
+f3 <- f3 + scale_x_discrete(limits = fecalorder, labels = labels)
+f3
+
+save.image("pcoa_taxa_visualizations.RData")
+
+```
+
